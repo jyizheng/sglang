@@ -18,7 +18,10 @@ import time
 from aiohttp import web
 
 from sglang.srt.managers.io_struct import ProfileReq, ProfileReqType
-from sglang.srt.runtime_context import get_observability
+from sglang.srt.runtime_context import (
+    get_observability,
+    get_serving,
+)
 from sglang.srt.utils.common import get_bool_env_var
 
 logger = logging.getLogger(__name__)
@@ -205,7 +208,7 @@ async def serve_grpc(server_args, model_info=None):
             )
         try:
             sidecar_runner = await _start_sidecar_server(
-                server_args.host, sidecar_port, sidecar_app
+                get_serving().host, sidecar_port, sidecar_app
             )
         except OSError as e:
             logger.error(

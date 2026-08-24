@@ -256,6 +256,14 @@ _CONFIGURED_SIZE_CALL_SITES = {
         "the lazy strategy bind in a worker: the CP group is what the strategy "
         "is being built for, and the configured width is what describes it"
     ),
+    ("srt/managers/rust_server.py", "tp_size"): (
+        "the rust server decides its transport from the launch width, in the "
+        "tokenizer process, which holds no model groups"
+    ),
+    ("srt/entrypoints/http_server_engine.py", "tp_size"): (
+        "the in-process HTTP engine adapter reports the launch width to its "
+        "caller before any group exists"
+    ),
     ("srt/utils/common.py", "tp_size"): (
         "the require_*_tp_gather predicates compared the configured tp_size "
         "when they read the record; the live property answers a different "

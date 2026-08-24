@@ -7,6 +7,7 @@ import torch
 
 from sglang.srt.entrypoints.EngineBase import EngineBase
 from sglang.srt.entrypoints.http_server import launch_server
+from sglang.srt.runtime_context import get_parallel, get_serving
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import MultiprocessingSerializer, kill_process_tree
 
@@ -60,7 +61,7 @@ class HttpServerEngineAdapter(EngineBase):
     def __init__(self, **kwargs):
         self.server_args = ServerArgs(**kwargs)
         print(
-            f"Launch HttpServerEngineAdapter at: {self.server_args.host}:{self.server_args.port}"
+            f"Launch HttpServerEngineAdapter at: {get_serving().host}:{self.server_args.port}"
         )
         self.process = launch_server_process(self.server_args)
 
@@ -96,7 +97,7 @@ class HttpServerEngineAdapter(EngineBase):
             {
                 "serialized_named_tensors": [
                     MultiprocessingSerializer.serialize(named_tensors, output_str=True)
-                    for _ in range(self.server_args.tp_size)
+                    for _ in range(get_parallel().config.tp_size)
                 ],
                 "load_format": load_format,
                 "flush_cache": flush_cache,
