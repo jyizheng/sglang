@@ -146,30 +146,14 @@ def _get_quant_field(quant_config: Any, key: str) -> Any:
     return getattr(quant_config, key, None)
 
 
-def _deepgemm_ue8m0_active() -> bool:
-    """Whether DeepGEMM repacks block-FP8 scales to packed UE8M0 here.
-
-    Imported lazily to keep protocol.py cheap; unknown means unsafe (reject).
-    """
-    try:
-        from sglang.srt.layers.deep_gemm_wrapper.configurer import (
-            DEEPGEMM_SCALE_UE8M0,
-        )
-    except Exception:
-        return True
-    return bool(DEEPGEMM_SCALE_UE8M0)
-
-
 def _fp8_round_trips_via_ipc(quant_config: Any) -> bool:
-    """Only block-wise FP8 without the UE8M0 scale repack is verified.
+    """Only block-wise FP8 is verified.
 
-    Per-tensor FP8 transposes layer.weight post-load; UE8M0 (SM100+ DeepGEMM)
-    repacks weight_scale_inv shape/dtype. The meta-init client reproduces
-    neither, so both are rejected.
+    The UE8M0 scale repack on SM100+ DeepGEMM rides the layout manifest
+    (layout_transformed + carried format_ue8m0 attr). Per-tensor FP8 remains
+    unverified end to end, so it is still rejected.
     """
-    if _get_quant_field(quant_config, "weight_block_size") is None:
-        return False
-    return not _deepgemm_ue8m0_active()
+    return _get_quant_field(quant_config, "weight_block_size") is not None
 
 
 # quant_method name -> predicate(quant_config) -> bool (True == verified safe).
@@ -178,6 +162,12 @@ IPC_QUANT_ALLOWLIST = {
     "": lambda _quant_config: True,  # unquantized
     "fp8": _fp8_round_trips_via_ipc,  # only block-wise FP8 verified
 }
+
+# Tensor attributes that must survive the IPC round trip: stamped by
+# process_weights_after_loading, read by kernel dispatch and by requant
+# idempotency checks (a client-side re-requant would corrupt the daemon's
+# shared weights in place).
+IPC_CARRIED_TENSOR_ATTRS = ("format_ue8m0",)
 
 
 def is_ipc_quant_supported(quant_method: str, quant_config: Any) -> bool:
@@ -220,10 +210,8 @@ def check_ipc_quant_support(
         f"meta-initialized client cannot reproduce, which would silently serve "
         f"wrong-numerics weights. Verified methods: {verified}. Note: FP8 is "
         f"only verified for block-wise configs (weight_block_size set), not "
-        f"per-tensor FP8, and on SM100+ additionally requires the DeepGEMM "
-        f"UE8M0 scale repack to be disabled (SGLANG_ENABLE_JIT_DEEPGEMM=0 on "
-        f"both the daemon and the engine). Disable the weight cache "
-        f"(--weight-cache-mode off) for this model."
+        f"per-tensor FP8. Disable the weight cache (--weight-cache-mode off) "
+        f"for this model."
     )
 
 

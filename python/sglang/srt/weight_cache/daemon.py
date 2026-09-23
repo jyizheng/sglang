@@ -59,6 +59,7 @@ from sglang.srt.runtime_context import (
 )
 
 from .protocol import (
+    IPC_CARRIED_TENSOR_ATTRS,
     CacheConfig,
     check_ipc_quant_support,
     cleanup_stale_daemon_files,
@@ -187,6 +188,8 @@ class WeightCacheDaemon:
         self.config: Optional[CacheConfig] = None
         # name -> transport-specific tensor entry metadata (shape/dtype/is_param + payload metadata)
         self.state_entries: Dict[str, Dict[str, Any]] = {}
+        # name -> checkpoint-time (shape, dtype); filled by load().
+        self._expected_layouts: Dict[str, Any] = {}
         self.preloaded_weights_bytes = 0
         self.transport_backend = None
 
@@ -372,6 +375,13 @@ class WeightCacheDaemon:
 
         model_config, load_config = self._prepare_load()
 
+        # Checkpoint-time layouts, captured the same way the client meta-inits
+        # its model: exported tensors that differ were reshaped by
+        # process_weights_after_loading and are declared in the manifest.
+        self._expected_layouts = self._meta_expected_layouts(
+            model_config=model_config, load_config=load_config
+        )
+
         current_platform.empty_cache()
         memory_before_load = torch.cuda.memory_reserved(self.gpu_id)
 
@@ -411,6 +421,26 @@ class WeightCacheDaemon:
             f"Exported {len(self.state_entries)} tensors as IPC handles. "
             f"Ready to serve."
         )
+
+    def _meta_expected_layouts(self, *, model_config, load_config):
+        """Checkpoint-time (shape, dtype) per tensor name, from a meta init."""
+        from sglang.srt.model_loader.loader import (
+            _get_quantization_config,
+            _initialize_model,
+        )
+        from sglang.srt.model_loader.utils import set_default_torch_dtype
+
+        quant_config = _get_quantization_config(model_config, load_config)
+        with set_default_torch_dtype(model_config.dtype):
+            with torch.device("meta"):
+                meta_model = _initialize_model(model_config, load_config, quant_config)
+        expected = {}
+        for name, param in meta_model.named_parameters(remove_duplicate=False):
+            expected[name] = (tuple(param.shape), str(param.dtype))
+        for name, buf in meta_model.named_buffers():
+            expected[name] = (tuple(buf.shape), str(buf.dtype))
+        del meta_model
+        return expected
 
     @staticmethod
     def _assert_ipc_compatible_allocator() -> None:
@@ -470,8 +500,31 @@ class WeightCacheDaemon:
         # Persistence must survive the round trip: without it the client
         # registers non-persistent buffers (e.g. rotary cos_sin_cache) as
         # persistent, changing the loaded model's state_dict shape.
+        transformed_count = 0
         for name, entry in self.state_entries.items():
             entry["persistent"] = name in state_dict_names
+            tensor = state_tensors[name][0]
+            expected = self._expected_layouts.get(name)
+            # A tensor whose exported layout differs from the checkpoint-time
+            # meta layout was reshaped by process_weights_after_loading; the
+            # client accepts the declared layout instead of hard-erroring.
+            entry["layout_transformed"] = expected is not None and expected != (
+                tuple(tensor.shape),
+                str(tensor.dtype),
+            )
+            transformed_count += entry["layout_transformed"]
+            attrs = {
+                attr: tensor.__dict__[attr]
+                for attr in IPC_CARRIED_TENSOR_ATTRS
+                if attr in tensor.__dict__
+            }
+            if attrs:
+                entry["tensor_attrs"] = attrs
+        if transformed_count:
+            logger.info(
+                f"[WeightCacheDaemon gpu={self.gpu_id}] Manifest declares "
+                f"{transformed_count} post-load layout transforms"
+            )
 
         # Log approximate serialized metadata size (not payload-backed bytes).
         # Only the handle blob carries real weight, so measure it directly:

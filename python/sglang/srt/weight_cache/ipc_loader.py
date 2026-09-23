@@ -352,6 +352,7 @@ class IpcModelLoader(BaseModelLoader):
         # Iterate over ALL daemon entries (not just model params/buffers).
         # This ensures post-quantization parameters (weight_scale, etc.)
         # that were created by process_weights_after_loading are also mapped.
+        transformed_count = 0
         for name, entry in entries.items():
             imported_tensor = self._transport_backend.import_tensor(entry)
             is_param = entry.get("is_param", True)
@@ -359,8 +360,12 @@ class IpcModelLoader(BaseModelLoader):
             # persistence flag.
             persistent = entry.get("persistent", True)
 
-            if name in existing_names:
-                # Existing parameter/buffer — validate shape/dtype
+            if name in existing_names and not entry.get("layout_transformed", False):
+                # Existing parameter/buffer — validate shape/dtype. A tensor
+                # the daemon declared layout_transformed was reshaped by
+                # process_weights_after_loading against its own meta layout
+                # (identical to ours by CacheConfig), so its daemon layout
+                # replaces the checkpoint-time one instead of erroring.
                 if name in existing_params:
                     ref_param = existing_params[name]
                 else:
@@ -375,6 +380,13 @@ class IpcModelLoader(BaseModelLoader):
                     )
                     del imported_tensor
                     continue
+            transformed_count += entry.get("layout_transformed", False)
+
+            # Post-load code reads these off the tensor (kernel dispatch,
+            # requant idempotency); a missing attr can trigger an in-place
+            # re-requant that corrupts the daemon's shared weights.
+            for attr, value in entry.get("tensor_attrs", {}).items():
+                setattr(imported_tensor, attr, value)
 
             # Replace or register the tensor in the model
             self._set_module_tensor(
@@ -443,7 +455,8 @@ class IpcModelLoader(BaseModelLoader):
 
         logger.info(
             f"[IpcModelLoader] Zero-copy: mapped {imported_count} tensors "
-            f"({new_params_count} new post-quant), time={map_elapsed:.3f}s"
+            f"({new_params_count} new post-quant, {transformed_count} manifest "
+            f"layout transforms), time={map_elapsed:.3f}s"
         )
 
         return model

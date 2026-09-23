@@ -29,6 +29,7 @@ import torch
 
 from sglang.srt.environ import envs
 from sglang.srt.weight_cache.protocol import (
+    IPC_CARRIED_TENSOR_ATTRS,
     IPC_QUANT_ALLOWLIST,
     CacheConfig,
     UnsupportedQuantForIPCError,
@@ -350,37 +351,25 @@ class TestDaemonLaunchConfiguration(CustomTestCase):
 
 
 class TestIpcQuantAllowlist(CustomTestCase):
-    def _no_ue8m0(self):
-        # Pin the DeepGEMM UE8M0 probe so the cases are hardware-independent.
-        return unittest.mock.patch(
-            "sglang.srt.weight_cache.protocol._deepgemm_ue8m0_active",
-            return_value=False,
-        )
-
     def test_unquantized_is_supported(self):
         self.assertTrue(is_ipc_quant_supported("", None))
 
     def test_block_fp8_supported_but_per_tensor_fp8_rejected(self):
-        with self._no_ue8m0():
-            self.assertTrue(
-                is_ipc_quant_supported("fp8", {"weight_block_size": [128, 128]})
-            )
-            # Per-tensor FP8 (no weight_block_size) transposes the weight during
-            # post-processing -> not reproducible by the meta-init client.
-            self.assertFalse(is_ipc_quant_supported("fp8", {}))
-            self.assertFalse(is_ipc_quant_supported("fp8", None))
+        # Block-wise FP8 is supported unconditionally: the UE8M0 repack rides
+        # the layout manifest instead of being rejected at the gate.
+        self.assertTrue(
+            is_ipc_quant_supported("fp8", {"weight_block_size": [128, 128]})
+        )
+        # Per-tensor FP8 (no weight_block_size) transposes the weight during
+        # post-processing -> not reproducible by the meta-init client.
+        self.assertFalse(is_ipc_quant_supported("fp8", {}))
+        self.assertFalse(is_ipc_quant_supported("fp8", None))
 
-    def test_block_fp8_rejected_when_ue8m0_repack_active(self):
-        # On SM100+ with DeepGEMM active, post-processing repacks
-        # weight_scale_inv to packed UE8M0 (shape/dtype change) that the
-        # meta-init client cannot reproduce; block-FP8 must be rejected there.
-        with unittest.mock.patch(
-            "sglang.srt.weight_cache.protocol._deepgemm_ue8m0_active",
-            return_value=True,
-        ):
-            self.assertFalse(
-                is_ipc_quant_supported("fp8", {"weight_block_size": [128, 128]})
-            )
+    def test_ue8m0_attr_is_carried_over_ipc(self):
+        # fp8_utils stamps format_ue8m0 on requantized scales; the client-side
+        # requant idempotency check reads it, so dropping it from the carried
+        # set would re-requant shared daemon memory in place.
+        self.assertIn("format_ue8m0", IPC_CARRIED_TENSOR_ATTRS)
 
     def test_unknown_method_rejected(self):
         self.assertFalse(is_ipc_quant_supported("gptq_marlin", None))
@@ -396,10 +385,9 @@ class TestIpcQuantAllowlist(CustomTestCase):
     def test_check_passes_on_supported(self):
         # Should not raise.
         check_ipc_quant_support("", None, where="daemon")
-        with self._no_ue8m0():
-            check_ipc_quant_support(
-                "fp8", {"weight_block_size": [128, 128]}, where="daemon"
-            )
+        check_ipc_quant_support(
+            "fp8", {"weight_block_size": [128, 128]}, where="daemon"
+        )
 
     def test_fp4_experts_rejected_regardless_of_quant_method(self):
         # MXFP4 routed experts are flagged on model_config, not in hf
